@@ -10,15 +10,14 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from json import JSONDecodeError
 from pathlib import Path
-from typing import List, Dict
+from typing import List, Dict, Literal
 
 import httpx
-from hcaptcha_challenger.agents.playwright.control import AgentT
 from loguru import logger
 from playwright.async_api import BrowserContext, expect, TimeoutError, Page, FrameLocator, Locator
 
-from services.models import EpicPlayer
-from utils import from_dict_to_model
+from epic_games.player import EpicPlayer
+from utils import from_dict_to_model, AgentG
 
 # fmt:off
 URL_CLAIM = "https://store.epicgames.com/en-US/free-games"
@@ -90,7 +89,7 @@ class CommonHandler:
 
     @staticmethod
     async def insert_challenge(
-        solver: AgentT,
+        solver: AgentG,
         page: Page,
         wpc: FrameLocator,
         payment_btn: Locator,
@@ -118,7 +117,7 @@ class EpicGames:
     Agent control
     """
 
-    _solver: AgentT = None
+    _solver: AgentG = None
     """
     Module for anti-captcha
     """
@@ -135,7 +134,7 @@ class EpicGames:
     ):
         """尽可能早地实例化，用于部署 captcha 事件监听器"""
         return cls(
-            player=player, _solver=AgentT.from_page(page=page, tmp_dir=tmp_dir, **solver_opt)
+            player=player, _solver=AgentG.from_page(page=page, tmp_dir=tmp_dir, **solver_opt)
         )
 
     @property
@@ -148,27 +147,25 @@ class EpicGames:
         return self._promotions
 
     async def _login(self, page: Page) -> str | None:
-        await page.goto(URL_CLAIM, wait_until="domcontentloaded")
-        while await page.locator('a[role="button"]:has-text("Sign In")').count() > 0:
-            await page.goto(URL_LOGIN, wait_until="domcontentloaded")
-            logger.info("login", url=page.url)
-            await page.click("#login-with-epic")
-            logger.info("login-with-epic", url=page.url)
-            await page.fill("#email", self.player.email)
-            await page.type("#password", self.player.password)
-            await page.click("#sign-in")
-
+        async def insert_challenge(stage: Literal["email_exists_prod", "login_prod"]):
             fall_in_challenge = False
 
             for _ in range(15):
-                if not fall_in_challenge:
-                    with suppress(TimeoutError):
-                        await page.wait_for_url(URL_CART_SUCCESS, timeout=3000)
-                        break
-                    logger.debug("claim_weekly_games", action="handle challenge")
+                if stage == "login_prod":
+                    if not fall_in_challenge:
+                        with suppress(TimeoutError):
+                            await page.wait_for_url(URL_CART_SUCCESS, timeout=3000)
+                            break
+                        logger.debug("Attack challenge", stage=stage)
+                elif stage == "email_exists_prod":
+                    if not fall_in_challenge:
+                        with suppress(TimeoutError):
+                            await page.type("#password", "", timeout=3000)
+                            break
+                        logger.debug("Attack challenge", stage=stage)
                 fall_in_challenge = True
-                result = await self._solver(window="login", recur_url=URL_CLAIM)
-                logger.debug("handle challenge", result=result)
+                result = await self._solver.execute(window=stage)
+                logger.debug("Parse result", stage=stage, result=result)
                 match result:
                     case self._solver.status.CHALLENGE_BACKCALL:
                         await page.click("//a[@class='talon_close_button']")
@@ -177,12 +174,33 @@ class EpicGames:
                     case self._solver.status.CHALLENGE_RETRY:
                         continue
                     case self._solver.status.CHALLENGE_SUCCESS:
+                        if stage == "signin" and not self._solver.qr_queue.empty():
+                            continue
                         with suppress(TimeoutError):
                             await page.wait_for_url(URL_CLAIM)
                             break
                         return
 
-        logger.success("login", result="token has not expired")
+        await page.goto(URL_CLAIM, wait_until="domcontentloaded")
+        while await page.locator('a[role="button"]:has-text("Sign In")').count() > 0:
+            await page.goto(URL_LOGIN, wait_until="domcontentloaded")
+            logger.info("login-with-email", url=page.url)
+
+            # {{< SIGN IN PAGE >}}
+            await page.fill("#email", self.player.email)
+            await page.click("//button[@aria-label='Continue']")
+
+            # {{< INSERT CHALLENGE - email_exists_prod >}}
+            await insert_challenge(stage="email_exists_prod")
+
+            # {{< NESTED PAGE >}}
+            await page.type("#password", self.player.password)
+            await page.click("#sign-in")
+
+            # {{< INSERT CHALLENGE - login_prod >}}
+            await insert_challenge(stage="login_prod")
+
+        logger.success("login", result="Successfully refreshed tokens")
         return self._solver.status.CHALLENGE_SUCCESS
 
     async def authorize(self, page: Page):

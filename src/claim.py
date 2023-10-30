@@ -3,6 +3,8 @@
 # Author     : QIN2DIM
 # GitHub     : https://github.com/QIN2DIM
 # Description:
+from __future__ import annotations
+
 import asyncio
 import os
 import sys
@@ -11,7 +13,7 @@ from typing import List
 
 import hcaptcha_challenger as solver
 from loguru import logger
-from playwright.async_api import BrowserContext, async_playwright
+from playwright.async_api import BrowserContext, async_playwright, TimeoutError
 
 from epic_games import (
     EpicPlayer,
@@ -21,6 +23,9 @@ from epic_games import (
     get_promotions,
     get_order_history,
 )
+import importlib_metadata
+
+self_supervised = True
 
 
 @dataclass
@@ -85,7 +90,7 @@ class ISurrender:
 
     async def claim_epic_games(self, context: BrowserContext):
         page = context.pages[0]
-        epic = EpicGames.from_player(self.player, page=page)
+        epic = EpicGames.from_player(self.player, page=page, self_supervised=self_supervised)
 
         if not self.ctx_cookies_is_available:
             logger.info("Try to flush cookie", task="claim_epic_games")
@@ -113,16 +118,34 @@ class ISurrender:
                 single_promotions.append(p)
 
         if single_promotions:
-            await epic.claim_weekly_games(page, single_promotions)
+            for _ in range(3):
+                try:
+                    if await epic.claim_weekly_games(page, single_promotions):
+                        break
+                except TimeoutError:
+                    continue
         if bundle_promotions:
-            await epic.claim_bundle_games(page, bundle_promotions)
+            for _ in range(3):
+                try:
+                    if await epic.claim_bundle_games(page, bundle_promotions):
+                        break
+                except TimeoutError:
+                    continue
 
     @logger.catch
     async def stash(self):
         if "linux" in sys.platform and "DISPLAY" not in os.environ:
             self.headless = True
 
-        logger.info("run", role="EpicPlayer", headless=self.headless)
+        logger.info(
+            "run",
+            image="20231029",
+            version=importlib_metadata.version("hcaptcha-challenger"),
+            role="EpicPlayer",
+            headless=self.headless,
+            self_supervised=self_supervised,
+        )
+
         async with async_playwright() as p:
             context = await p.firefox.launch_persistent_context(
                 user_data_dir=self.player.browser_context_dir,
@@ -133,7 +156,7 @@ class ISurrender:
                 args=["--hide-crash-restore-bubble"],
             )
             if not await self.prelude_with_context(context):
-                solver.install(upgrade=True)
+                solver.install(upgrade=True, clip=self_supervised)
                 await self.claim_epic_games(context)
             await context.close()
 

@@ -1,4 +1,4 @@
-name: Claim EpicGames from SourceGit
+name: auto
 
 on:
   workflow_dispatch:

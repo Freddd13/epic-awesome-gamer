@@ -48,3 +48,8 @@ jobs:
         git add .
         git commit -m "${{ env.FAKE_HASH }}" 
         git push -f
+
+# git fetch upstream
+# git merge upstream/main
+# git commit -m "ok"
+# git push
